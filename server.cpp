@@ -1,45 +1,40 @@
 #include <boost/asio.hpp>
+#include <boost/asio/spawn.hpp>
+#include <boost/bind.hpp>
+#include <memory>
 #include <iostream>
 #include <iomanip>
 
 using namespace std;
 namespace asio = boost::asio;
 namespace sys = boost::system;
+using udp = asio::ip::udp;
 
-class UDPAsyncServer {
- public:
-  using socket = boost::asio::ip::udp::socket;
-  using endpoint = boost::asio::ip::udp::endpoint;
-  static const int BufferSize = 256;
+static const size_t BufferSize = 256;
 
-  UDPAsyncServer(asio::io_service &service, unsigned short port)
-      : socket_(service, endpoint{asio::ip::udp::v4(), port}) {
-    WaitForReceive();
+using shared_udp_socket = shared_ptr<udp::socket>;
+
+void udp_send_to(asio::yield_context yield, shared_udp_socket socket, udp::endpoint peer) {
+  const char *msg = "Hello from server";
+  socket->async_send_to(asio::buffer(msg, strlen(msg)), peer, yield);
+}
+
+void udp_server(asio::yield_context yield, asio::io_service &service, unsigned short port) {
+  shared_udp_socket socket = make_shared<udp::socket>(service, udp::endpoint{udp::v4(), port});
+  char buffer[BufferSize];
+  udp::endpoint remote_peer;
+  sys::error_code ec;
+  while (true) {
+    socket->async_receive_from(asio::buffer(buffer, BufferSize), remote_peer, yield[ec]);
+    if (!ec) {
+      spawn(service, boost::bind(udp_send_to, ::_1, socket, remote_peer));
+    }
   }
-
-  void WaitForReceive() {
-    socket_.async_receive_from(asio::buffer(buffer_, BufferSize), remote_peer_,
-                               [this](const sys::error_code &ec, size_t sz) {
-                                 buffer_[sz] = 0;
-                                 cout << "Received "s << quoted(buffer_) << " from "s << remote_peer_ << endl;
-
-                                 WaitForReceive();
-
-                                 const char *msg = "Hello from server";
-                                 socket_.async_send_to(asio::buffer(msg, strlen(msg)), remote_peer_,
-                                                       [this](const sys::error_code &ec, size_t sz) {});
-                               });
-  }
-
- private:
-  socket socket_;
-  endpoint remote_peer_;
-  char buffer_[BufferSize];
-};
+}
 
 int main() {
   asio::io_service service;
-  UDPAsyncServer server{service, 55000};
+  spawn(service, boost::bind(udp_server, ::_1, boost::ref(service), 55000));
   service.run();
 
   return 0;
